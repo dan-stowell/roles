@@ -1,0 +1,122 @@
+#!/bin/bash
+# setup [--mode build|research]: installs these roles on this exe.dev VM.
+# Safe to rerun, for example after pulling changes or to switch modes.
+#
+# - guidance.md becomes the VM notes every agent reads (claude's CLAUDE.md,
+#   codex's and Shelley's AGENTS.md), after exe.dev's own note.
+# - roles/*.md become claude subagents in ~/.claude/agents, which Shelley's
+#   subagents read too.
+# - modes/MODE.md is how the main claude or Shelley coordinates them: it's
+#   appended to their system prompts, but not to subagents'.
+# - codex runs on the exe.dev LLM integration.
+# - the login page (login/) runs at https://VMNAME.exe.xyz:8001/, so claude can
+#   be logged in from a phone.
+set -euo pipefail
+
+mode=build
+while (($#)); do
+  case $1 in
+    --mode) mode=${2:?--mode needs a value}; shift 2 ;;
+    --mode=*) mode=${1#--mode=}; shift ;;
+    *) echo "usage: setup [--mode build|research]" >&2; exit 2 ;;
+  esac
+done
+here=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
+if [ ! -f "$here/modes/$mode.md" ] || [ "$mode" = shelley ]; then
+  echo "setup: no mode \"$mode\"; pick one of: $(cd "$here/modes" && ls | grep -v '^shelley' | sed 's/\.md$//' | xargs)" >&2
+  exit 2
+fi
+conf=~/.config/roles
+mkdir -p "$conf" ~/.claude/agents ~/.codex ~/.config/shelley/hooks ~/.local/bin ~/.cache
+
+# The VM notes go after exe.dev's own note, which is whatever precedes them in
+# Shelley's AGENTS.md. Newer images make claude's and codex's files symlinks to
+# Shelley's, so each is replaced with a file of its own.
+note=$(sed '/^# VM notes$/,$d' ~/.config/shelley/AGENTS.md 2>/dev/null || true)
+for f in ~/.config/shelley/AGENTS.md ~/.claude/CLAUDE.md ~/.codex/AGENTS.md; do
+  rm -f "$f"
+  { [ -z "$note" ] || printf '%s\n\n' "$note"; cat "$here/guidance.md"; } >"$f"
+done
+
+cp "$here"/roles/*.md ~/.claude/agents/
+cp "$here/modes/$mode.md" "$conf/coordinator.md"
+cp "$here/modes/shelley.md" "$conf/coordinator-shelley.md"
+echo "$mode" >"$conf/mode"
+
+# Shelley's system-prompt hook runs for its subagents as well, so the
+# coordinator notes go only to prompts that aren't a subagent's.
+cat >~/.config/shelley/hooks/system-prompt <<'EOF'
+#!/bin/sh
+prompt=$(cat)
+printf '%s' "$prompt"
+case $prompt in
+  *"You are a subagent of Shelley"*) ;;
+  *) printf '\n\n'; cat ~/.config/roles/coordinator.md; echo; cat ~/.config/roles/coordinator-shelley.md ;;
+esac
+EOF
+chmod +x ~/.config/shelley/hooks/system-prompt
+
+# codex uses Dan's ChatGPT sub through the exe.dev LLM integration. Its
+# workspace-write sandbox gets the network and a writable ~/.cache, so builds
+# can fetch dependencies.
+cat >~/.codex/config.toml <<TOML
+model = "gpt-6-astra"
+model_provider = "exe-llm"
+
+[model_providers.exe-llm]
+name = "exe-llm"
+base_url = "https://llm.int.exe.xyz/v1"
+
+[sandbox_workspace_write]
+network_access = true
+writable_roots = ["$HOME/.cache"]
+TOML
+
+# Shelley runs on GPT models only. Its default model is set in exe.dev's own
+# shelley.json, so a drop-in adds -default-model to the unit's ExecStart.
+# Shelley may well be what's running this script, so it isn't restarted here.
+shelley_model=${ROLES_SHELLEY_MODEL:-gpt-6.1-sol}
+if exec_start=$(grep "^ExecStart=" /etc/systemd/system/shelley.service 2>/dev/null); then
+  conf_text=$(printf '[Service]\nExecStart=\n%s\n' "${exec_start/ serve / -default-model $shelley_model serve }")
+  dropin=/etc/systemd/system/shelley.service.d/roles.conf
+  if [ "$(cat "$dropin" 2>/dev/null)" != "$conf_text" ]; then
+    sudo mkdir -p "${dropin%/*}"
+    sudo tee "$dropin" <<<"$conf_text" >/dev/null
+    sudo systemctl daemon-reload
+    echo "setup: Shelley will default to $shelley_model once restarted (sudo systemctl restart shelley)"
+  fi
+fi
+
+# The login page, as a service. KillMode=process, so restarting it doesn't
+# take down the claude it started in tmux.
+if command -v go >/dev/null; then
+  (cd "$here/login" && go build -o ~/.local/bin/claude-login .)
+  claude_dir=$(dirname "$(command -v claude)")
+  sudo tee /etc/systemd/system/claude-login.service >/dev/null <<EOF
+[Unit]
+Description=claude login page
+After=network-online.target
+
+[Service]
+User=$USER
+WorkingDirectory=$HOME
+Environment=HOME=$HOME PATH=$HOME/.local/bin:$claude_dir:/usr/local/bin:/usr/bin:/bin
+ExecStart=$HOME/.local/bin/claude-login -addr :8001 ${ROLES_LOGIN_ALLOW:+-allow $ROLES_LOGIN_ALLOW}
+Restart=on-failure
+KillMode=process
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  sudo systemctl daemon-reload
+  sudo systemctl enable --quiet claude-login
+  sudo systemctl restart claude-login
+  echo "setup: login page at https://$(hostname -s).exe.xyz:8001/"
+else
+  echo "setup: no go on this VM, so the login page isn't installed" >&2
+fi
+
+if [ -z "$(git config --global user.email)" ]; then
+  echo "setup: git has no user.name/user.email set; set them before committing" >&2
+fi
+echo "setup: installed roles in $mode mode"
