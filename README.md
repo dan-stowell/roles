@@ -39,3 +39,52 @@ repo and rerun `setup`.
   `claude auth login`, shows the sign-in link to copy, and takes the code
   back. Set `ROLES_LOGIN_ALLOW` to a comma-separated email list before
   running `setup` to restrict it further than exe.dev's proxy does.
+- `start-claude`: installed in `~/.local/bin`; starts or checks the persistent
+  interactive Claude session, with Remote Control and the installed
+  `~/.config/roles/coordinator.md` appended to its normal system prompt.
+
+## Starting Claude
+
+Setup needs `claude` (with `--remote-control` support), `tmux`, `go`, and
+passwordless `sudo` for systemd. It installs/enables `roles-claude.service`,
+without interrupting an existing Claude session or restarting Shelley.
+After signing in on the login page, Claude starts automatically. If already
+signed in, use **Start / check Claude** there, or run `~/.local/bin/start-claude`.
+Retries reuse a running session; they don't repeat OAuth or create duplicates.
+
+Claude always starts in `$HOME`, not the caller's repository. It keeps normal
+permissions: setup does not accept trust, onboarding, or Remote Control
+prompts for you. A running process is **not** proof that Remote Control is
+ready. The launcher shows the terminal and any visible remote session URL.
+If a prompt needs attention, attach from a terminal:
+
+```
+tmux -L roles-claude attach -t =claude
+```
+
+Review prompts yourself; use `/remote-control` to check/connect Remote Control
+if needed. Detach with **Ctrl-b, then d** to leave Claude running. This is an
+interactive session, not the standalone `claude remote-control` server, so it
+can carry the coordinator prompt.
+
+Systemd owns an isolated foreground tmux server, independent of the login
+page and your other tmux sessions. It starts on reboot, but does not
+auto-restart after Claude exits/crashes; run the launcher to retry.
+`sudo systemctl stop roles-claude` stops it.
+After rerunning setup (including changing coordinator mode), an existing
+session keeps its old prompt until you deliberately run
+`sudo systemctl restart roles-claude`. Restarting starts a new conversation.
+Startup failures include service/terminal diagnostics; inspect
+`journalctl -u roles-claude` too. The private
+`~/.cache/roles/claude.log` contains terminal output (possibly chat text or
+session URLs), and is cleared at each service start.
+
+Development checks:
+
+```
+bash -n setup start-claude
+shellcheck setup start-claude
+go -C login test -race ./...
+go -C login build ./...
+go -C login vet ./...
+```

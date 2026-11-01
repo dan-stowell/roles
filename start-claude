@@ -1,0 +1,70 @@
+#!/bin/bash
+# Start (or inspect) the systemd-owned interactive Claude session.
+set -euo pipefail
+
+unit=roles-claude.service
+socket=roles-claude
+session=claude
+
+case ${1:-} in
+  --session)
+    # Never inherit the login server's or caller's working directory.
+    cd "$HOME"
+    coordinator=$(cat "$HOME/.config/roles/coordinator.md")
+    if [ -z "$coordinator" ]; then
+      echo "start-claude: coordinator.md is empty" >&2
+      exit 1
+    fi
+    exec claude --remote-control --append-system-prompt "$coordinator"
+    ;;
+  --wait-session)
+    # tmux -D only loads its config when its first client connects. This
+    # ExecStartPost probe both triggers that and bounds service startup.
+    for ((i=0; i<50; i++)); do
+      if tmux -L "$socket" has-session -t "=$session" 2>/dev/null; then
+        exit 0
+      fi
+      sleep .1
+    done
+    echo "start-claude: no Claude session appeared" >&2
+    exit 1
+    ;;
+  "") ;;
+  *) echo "usage: start-claude" >&2; exit 2 ;;
+esac
+
+diagnostics() {
+  echo "start-claude: Claude did not stay running. Recent service/terminal output:" >&2
+  timeout 2s journalctl -u "$unit" -n 12 --no-pager >&2 || true
+  tail -c 6000 "$HOME/.cache/roles/claude.log" >&2 2>/dev/null || true
+}
+
+# sudo must never ask the browser process for a password. Neither systemctl
+# nor a broken tmux server may leave a web request waiting indefinitely.
+if ! timeout -k 2s 12s sudo -n systemctl start "$unit"; then
+  diagnostics
+  exit 1
+fi
+sleep 2
+if ! timeout 2s systemctl is-active --quiet "$unit" ||
+   ! timeout 2s tmux -L "$socket" has-session -t "=$session"; then
+  diagnostics
+  exit 1
+fi
+if ! screen=$(timeout 2s tmux -L "$socket" capture-pane -p -J -t "=$session:"); then
+  diagnostics
+  exit 1
+fi
+
+echo "Claude process is running; Remote Control readiness is NOT verified."
+echo "Review any onboarding, trust, or Remote Control prompts yourself:"
+echo "  tmux -L $socket attach -t =$session"
+echo "Detach without stopping Claude: Ctrl-b, then d."
+echo
+printf '%s\n' "$screen"
+url=$(printf '%s\n' "$screen" | grep -Eo 'https://claude\.ai/code/[^[:space:]<>]+' | head -n 1 || true)
+if [ -n "$url" ]; then
+  printf '\nRemote session URL shown by Claude: %s\n' "$url"
+else
+  echo "No remote session URL visible. Attach to resolve prompts/check /remote-control."
+fi
