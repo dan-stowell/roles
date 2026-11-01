@@ -52,10 +52,23 @@ After signing in on the login page, Claude starts automatically. If already
 signed in, use **Start / check Claude** there, or run `~/.local/bin/start-claude`.
 Retries reuse a running session; they don't repeat OAuth or create duplicates.
 
-Claude always starts in `$HOME`, not the caller's repository. It keeps normal
-permissions: setup does not accept trust, onboarding, or Remote Control
-prompts for you. A running process is **not** proof that Remote Control is
-ready. The launcher shows the terminal and any visible remote session URL.
+Claude always starts in `$HOME`, not the caller's repository, with normal
+permissions. The login page recognizes its workspace safety prompt only for
+that exact directory. Review the displayed path and read/edit/execute warning,
+then explicitly tap **Trust this folder and continue** to accept it. Setup
+and **Start / check Claude** never accept prompts automatically.
+
+Consent expires after one minute and is one-shot, tied to the live pane and
+exact prompt/selection. Attached terminal clients must detach first. If the
+prompt changes, check again; if sending fails or the prompt remains after an
+attempt, inspect the terminal instead of retrying consent. Capture and input
+are best-effort: another local process can still change the terminal between
+the final check and input. No internal Claude trust settings are edited.
+
+A running process or visible remote session link is **not** proof that Remote
+Control is ready. The page shows a fresh terminal snapshot on load, after
+consent, or with **Start / check Claude**; it does not continuously poll.
+Unrecognized prompts require terminal review; no automatic keys are sent.
 If a prompt needs attention, attach from a terminal:
 
 ```
