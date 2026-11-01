@@ -23,6 +23,8 @@ while (($#)); do
 done
 here=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
 if [ ! -f "$here/modes/$mode.md" ] || [ "$mode" = shelley ]; then
+  # The directory contains only the repository's fixed mode filenames.
+  # shellcheck disable=SC2010
   echo "setup: no mode \"$mode\"; pick one of: $(cd "$here/modes" && ls | grep -v '^shelley' | sed 's/\.md$//' | xargs)" >&2
   exit 2
 fi
@@ -42,6 +44,40 @@ cp "$here"/roles/*.md ~/.claude/agents/
 cp "$here/modes/$mode.md" "$conf/coordinator.md"
 cp "$here/modes/shelley.md" "$conf/coordinator-shelley.md"
 echo "$mode" >"$conf/mode"
+
+# A foreground tmux server owns just this Claude session. systemd tracks its
+# real lifetime, including Claude exiting, and never loops on a consent prompt
+# or crash. Rerunning setup must not interrupt a running conversation.
+command -v claude >/dev/null
+command -v tmux >/dev/null
+install -m 755 "$here/start-claude" ~/.local/bin/start-claude
+cp "$here/claude.tmux.conf" "$conf/claude.tmux.conf"
+install -d -m 700 ~/.cache/roles
+claude_dir=$(dirname "$(command -v claude)")
+sudo tee /etc/systemd/system/roles-claude.service >/dev/null <<EOF
+[Unit]
+Description=interactive Claude with roles and Remote Control
+After=network-online.target
+
+[Service]
+Type=exec
+User=$USER
+WorkingDirectory=$HOME
+Environment=HOME=$HOME PATH=$HOME/.local/bin:$claude_dir:/usr/local/bin:/usr/bin:/bin
+UMask=0077
+ExecStartPre=/usr/bin/truncate -s 0 $HOME/.cache/roles/claude.log
+ExecStart=/usr/bin/tmux -D -L roles-claude -f $conf/claude.tmux.conf
+ExecStartPost=$HOME/.local/bin/start-claude --wait-session
+TimeoutStartSec=10
+TimeoutStopSec=5
+Restart=no
+
+[Install]
+WantedBy=multi-user.target
+EOF
+sudo systemctl daemon-reload
+sudo systemctl enable --quiet roles-claude
+echo "setup: installed start-claude; existing sessions keep their current coordinator until restarted"
 
 # Shelley's system-prompt hook runs for its subagents as well, so the
 # coordinator notes go only to prompts that aren't a subagent's.
@@ -88,10 +124,10 @@ if exec_start=$(grep "^ExecStart=" /etc/systemd/system/shelley.service 2>/dev/nu
 fi
 
 # The login page, as a service. KillMode=process, so restarting it doesn't
-# take down the claude it started in tmux.
+# take down an in-progress auth login in tmux. The interactive Claude runs in
+# its own service, independently of this page.
 if command -v go >/dev/null; then
   (cd "$here/login" && go build -o ~/.local/bin/claude-login .)
-  claude_dir=$(dirname "$(command -v claude)")
   sudo tee /etc/systemd/system/claude-login.service >/dev/null <<EOF
 [Unit]
 Description=claude login page

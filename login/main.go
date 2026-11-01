@@ -8,6 +8,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -54,6 +55,7 @@ func main() {
 	mux.HandleFunc("GET /api/status", s.status)
 	mux.HandleFunc("POST /api/start", s.start)
 	mux.HandleFunc("POST /api/code", s.code)
+	mux.HandleFunc("POST /api/claude", s.startClaude)
 	log.Printf("listening on %s", *addr)
 	log.Fatal(http.ListenAndServe(*addr, s.auth(mux)))
 }
@@ -89,7 +91,7 @@ func (s *server) status(w http.ResponseWriter, r *http.Request) {
 func (s *server) start(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	exec.Command("tmux", "kill-session", "-t", session).Run()
+	exec.Command("tmux", "kill-session", "-t", "="+session).Run()
 	// A wide window, so the URL isn't wrapped.
 	args := []string{"new-session", "-d", "-s", session, "-x", "2000", "-y", "50", "claude", "auth", "login", "--claudeai"}
 	if *email != "" {
@@ -119,20 +121,16 @@ func (s *server) code(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if exec.Command("tmux", "has-session", "-t", session).Run() != nil {
+	if exec.Command("tmux", "has-session", "-t", "="+session).Run() != nil {
 		httpError(w, "no login is waiting; get a new sign-in link")
 		return
 	}
-	exec.Command("tmux", "send-keys", "-t", session, "-l", strings.TrimSpace(req.Code)).Run()
-	exec.Command("tmux", "send-keys", "-t", session, "Enter").Run()
+	exec.Command("tmux", "send-keys", "-t", "="+session+":", "-l", strings.TrimSpace(req.Code)).Run()
+	exec.Command("tmux", "send-keys", "-t", "="+session+":", "Enter").Run()
 	for range 30 {
 		if loggedIn() {
-			exec.Command("tmux", "kill-session", "-t", session).Run()
-			out, err := exec.Command(*starter).CombinedOutput()
-			if err != nil {
-				log.Printf("%s: %v: %s", *starter, err, out)
-			}
-			writeJSON(w, map[string]any{"loggedIn": true, "started": err == nil, "output": string(out)})
+			exec.Command("tmux", "kill-session", "-t", "="+session).Run()
+			s.launchClaude(w, r)
 			return
 		}
 		time.Sleep(2 * time.Second)
@@ -140,12 +138,51 @@ func (s *server) code(w http.ResponseWriter, r *http.Request) {
 	httpError(w, "the login didn't take; the code may be wrong or expired. Its screen:\n%s", screen())
 }
 
+// startClaude retries launching for an already authenticated account, without
+// another OAuth login. It shares the post-login path and its serialization.
+func (s *server) startClaude(w http.ResponseWriter, r *http.Request) {
+	if !s.mu.TryLock() {
+		httpError(w, "another login/start is in progress; retry shortly")
+		return
+	}
+	defer s.mu.Unlock()
+	if !loggedIn() {
+		httpError(w, "Claude isn't logged in; get a sign-in link first")
+		return
+	}
+	s.launchClaude(w, r)
+}
+
+// launchClaude is called with s.mu held. "started" means the launcher found
+// the process running, not that Remote Control is connected or prompts passed.
+func (s *server) launchClaude(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, *starter)
+	cmd.WaitDelay = time.Second
+	out, err := cmd.CombinedOutput()
+	result := map[string]any{"loggedIn": true, "started": err == nil, "output": string(out)}
+	if err != nil {
+		detail := fmt.Sprintf("%s: %v", *starter, err)
+		if ctx.Err() != nil {
+			detail += ": " + ctx.Err().Error()
+		}
+		result["error"] = detail
+		log.Printf("%s", detail)
+	}
+	writeJSON(w, result)
+}
+
 func loggedIn() bool {
-	return exec.Command("claude", "auth", "status").Run() == nil
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "claude", "auth", "status")
+	cmd.WaitDelay = time.Second
+	return cmd.Run() == nil
 }
 
 func screen() string {
-	out, _ := exec.Command("tmux", "capture-pane", "-p", "-J", "-t", session).Output()
+	out, _ := exec.Command("tmux", "capture-pane", "-p", "-J", "-t", "="+session+":").Output()
 	return strings.TrimSpace(string(out))
 }
 
@@ -195,6 +232,7 @@ const page = `<!doctype html>
 <p id="state">Checking…</p>
 
 <div class="step">
+  <button id="launch" hidden>Start / check Claude</button>
   <button id="start">Get sign-in link</button>
   <div id="link" hidden>
     <a class="url" id="url" target="_blank" rel="noopener"></a>
@@ -231,7 +269,21 @@ async function refresh() {
   $('state').textContent = s.loggedIn ? 'claude is logged in on this VM.' : 'claude isn\'t logged in on this VM yet.';
   $('state').className = s.loggedIn ? 'ok' : '';
   $('start').textContent = s.loggedIn ? 'Log in again' : 'Get sign-in link';
+  $('launch').hidden = !s.loggedIn;
 }
+
+function launched(r) {
+  msg((r.started ? 'Claude process is running (Remote Control may need attention).\n'
+                 : 'Logged in, but Claude did not start:\n' + (r.error || '') + '\n')
+      + (r.output || ''), r.started ? '' : 'err');
+}
+
+$('launch').onclick = async () => {
+  $('launch').disabled = true; msg('Starting / checking Claude…');
+  try { launched(await call('/api/claude', {})); }
+  catch (e) { msg(e.message, 'err'); }
+  $('launch').disabled = false;
+};
 
 $('start').onclick = async () => {
   $('start').disabled = true; msg('Starting claude auth login…');
@@ -253,8 +305,7 @@ $('submit').onclick = async () => {
   $('submit').disabled = true; msg('Logging in…');
   try {
     const r = await call('/api/code', {code: $('code').value});
-    msg(r.started ? 'Logged in, and claude is starting.\n' + (r.output || '')
-                  : 'Logged in, but claude didn\'t start:\n' + (r.output || ''), r.started ? 'ok' : 'err');
+    launched(r);
     $('link').hidden = true; $('codestep').hidden = true; $('code').value = '';
     refresh();
   } catch (e) { msg(e.message, 'err'); }
