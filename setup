@@ -6,8 +6,9 @@
 #   codex's and Shelley's AGENTS.md), after exe.dev's own note.
 # - roles/*.md become claude subagents in ~/.claude/agents, which Shelley's
 #   subagents read too.
-# - modes/MODE.md is how the main claude or Shelley coordinates them: it's
-#   appended to their system prompts, but not to subagents'.
+# - modes/MODE.md is how the main claude coordinates them.
+# - Shelley gets one opt-in Multi-agent profile, always using build mode;
+#   normal conversations still start with its built-in Default profile.
 # - codex runs on the exe.dev LLM integration.
 # - the login page (login/) runs at https://VMNAME.exe.xyz:8001/, so claude can
 #   be logged in from a phone.
@@ -23,10 +24,15 @@ while (($#)); do
 done
 here=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
 if [ ! -f "$here/modes/$mode.md" ] || [ "$mode" = shelley ]; then
+  # Mode filenames are controlled by this repo.
+  # shellcheck disable=SC2010
   echo "setup: no mode \"$mode\"; pick one of: $(cd "$here/modes" && ls | grep -v '^shelley' | sed 's/\.md$//' | xargs)" >&2
   exit 2
 fi
 conf=~/.config/roles
+# Refuse unknown hooks before changing any installed files. The installer also
+# removes only the exact legacy hook, after saving the profile and default.
+"$here/install-shelley-profile"
 mkdir -p "$conf" ~/.claude/agents ~/.codex ~/.config/shelley/hooks ~/.local/bin ~/.cache
 
 # The VM notes go after exe.dev's own note, which is whatever precedes them in
@@ -42,19 +48,6 @@ cp "$here"/roles/*.md ~/.claude/agents/
 cp "$here/modes/$mode.md" "$conf/coordinator.md"
 cp "$here/modes/shelley.md" "$conf/coordinator-shelley.md"
 echo "$mode" >"$conf/mode"
-
-# Shelley's system-prompt hook runs for its subagents as well, so the
-# coordinator notes go only to prompts that aren't a subagent's.
-cat >~/.config/shelley/hooks/system-prompt <<'EOF'
-#!/bin/sh
-prompt=$(cat)
-printf '%s' "$prompt"
-case $prompt in
-  *"You are a subagent of Shelley"*) ;;
-  *) printf '\n\n'; cat ~/.config/roles/coordinator.md; echo; cat ~/.config/roles/coordinator-shelley.md ;;
-esac
-EOF
-chmod +x ~/.config/shelley/hooks/system-prompt
 
 # codex uses Dan's ChatGPT sub through the exe.dev LLM integration. Its
 # workspace-write sandbox gets the network and a writable ~/.cache, so builds

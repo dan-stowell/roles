@@ -1,0 +1,122 @@
+#!/usr/bin/env python3
+"""Install the opt-in Multi-agent profile through Shelley's local socket API."""
+
+import json
+from pathlib import Path
+import subprocess
+import sys
+from urllib.parse import quote
+
+
+PROFILE = "Multi-agent"
+# Exact output of the old setup heredoc. Never remove a user-written hook.
+LEGACY_HOOK = b"""#!/bin/sh
+prompt=$(cat)
+printf '%s' "$prompt"
+case $prompt in
+  *"You are a subagent of Shelley"*) ;;
+  *) printf '\\n\\n'; cat ~/.config/roles/coordinator.md; echo; cat ~/.config/roles/coordinator-shelley.md ;;
+esac
+"""
+
+
+def check_hook(hook):
+    if hook.is_symlink() or (
+        hook.exists() and (not hook.is_file() or hook.read_bytes() != LEGACY_HOOK)
+    ):
+        raise ValueError(
+            f"refusing unknown system-prompt hook: {hook}; "
+            "move it aside yourself before retrying (it would affect all profiles)"
+        )
+    return hook.exists()
+
+
+def request(socket, method, path, body=None):
+    # Ignore curlrc and proxies: this must only talk to the local Unix socket.
+    command = [
+        "curl", "--disable", "--silent", "--show-error", "--fail",
+        "--max-time", "30", "--noproxy", "*", "--unix-socket", str(socket),
+        "--request", method, "http://localhost/api/" + path,
+    ]
+    if body is not None:
+        command += ["--header", "Content-Type: application/json", "--data-binary", "@-"]
+    result = subprocess.run(
+        command, input=json.dumps(body) if body is not None else None,
+        text=True, capture_output=True, check=False,
+    )
+    if result.returncode:
+        raise ValueError(
+            f"{method} /api/{path} failed via {socket}: {result.stderr.strip()}"
+        )
+    if method == "GET":
+        return json.loads(result.stdout)
+    return None
+
+
+def install():
+    here = Path(__file__).resolve().parent
+    home = Path.home()
+    hook = home / ".config/shelley/hooks/system-prompt"
+    legacy = check_hook(hook)  # Preflight before any API or filesystem mutations.
+    build = (here / "modes/build.md").read_text()
+    mapping = (here / "modes/shelley.md").read_text()
+    roles = {path.name: path.read_bytes() for path in (here / "roles").glob("*.md")}
+    if not roles:
+        raise ValueError("no roles/*.md found beside installer; run from the complete repo")
+
+    socket = home / ".config/shelley/shelley.sock"
+    stock = request(socket, "GET", "system-prompt")
+    if (not isinstance(stock, dict) or
+            not isinstance(stock.get("template"), str) or not stock["template"].strip()):
+        raise ValueError("GET /api/system-prompt did not return a nonempty template")
+    profiles = request(socket, "GET", "profiles")
+    if (not isinstance(profiles, list) or
+            any(not isinstance(p, dict) or not isinstance(p.get("name"), str) for p in profiles) or
+            sum(p["name"] == "Default" for p in profiles) != 1 or
+            sum(p["name"] == PROFILE for p in profiles) > 1):
+        raise ValueError("GET /api/profiles did not return profiles with a unique Default")
+    existing = next((p for p in profiles if p["name"] == PROFILE), None)
+    # PUT replaces settings. Preserve only documented writable fields, not GET metadata.
+    settings = {
+        "model": "", "thinking_level": "", "tool_overrides": {},
+        "compact_nudge_tokens": 0,
+    }
+    if existing is not None:
+        for field in settings:
+            if field not in existing:
+                raise ValueError(f"existing {PROFILE} profile is missing {field}")
+            settings[field] = existing[field]
+        for field in ("idle_compaction_minutes", "idle_compaction_prompt",
+                      "cache_keep_warm_minutes", "voice_prompt"):
+            if field in existing:
+                settings[field] = existing[field]
+    settings["system_prompt"] = (
+        stock["template"].rstrip() + "\n\n" + build.rstrip() + "\n\n" + mapping
+    )
+
+    # Install the roles even when invoked standalone (no services or restarts).
+    agents = home / ".claude/agents"
+    agents.mkdir(parents=True, exist_ok=True)
+    for name, content in roles.items():
+        (agents / name).write_bytes(content)
+    if existing is None:
+        request(socket, "POST", "profiles", {"name": PROFILE, **settings})
+    else:
+        request(socket, "PUT", "profiles/" + quote(PROFILE, safe=""), settings)
+    request(socket, "POST", "profiles/Default/default")
+    if legacy:
+        # Don't remove a hook changed while the API requests were in flight.
+        check_hook(hook)
+        hook.unlink(missing_ok=True)
+    print(f"Installed Shelley profile {PROFILE}; Default is the startup default.")
+    print(f"Select {PROFILE} explicitly for coordinated roles; existing conversations are not switched.")
+
+
+if __name__ == "__main__":
+    try:
+        if len(sys.argv) != 1:
+            raise ValueError("usage: install-shelley-profile")
+        install()
+    except (OSError, ValueError) as error:
+        print(f"install-shelley-profile: {error}", file=sys.stderr)
+        sys.exit(1)
