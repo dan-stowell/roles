@@ -40,7 +40,8 @@ The launcher starts a detached `claude` tmux session in the calling directory
 (the login service uses your home directory), appending the installed
 `~/.config/roles/coordinator.md` to Claude's normal system prompt. It confirms
 the known theme, security, workspace-trust and bypass-permissions onboarding
-screens automatically in a new session.
+screens automatically in a new session, and chooses “Not now” for the
+experimental fullscreen renderer.
 **Dangerous default:** it enables `--remote-control` and
 `--dangerously-skip-permissions`, trusting the calling workspace and allowing
 commands without approval. Use this only in your scoped, disposable VM, with

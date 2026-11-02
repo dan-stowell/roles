@@ -48,19 +48,22 @@ import tty
 home = pathlib.Path.home()
 mode = (home / "ui-mode").read_text().strip() if (home / "ui-mode").exists() else "ready"
 url = "https://claude.ai/code/session_test123"
-ready = f"/remote-control is active\n{url}\n/rc active | bypass permissions on"
+main_input = '────────────────────\n❯ Try "fix lint errors"\n────────────────────\n⏵⏵ bypass permissions on (shift+tab to cycle) /rc active'
+ready = f"/remote-control is active\n{url}\n{main_input}"
 prompts = [
-    "Choose the text style that looks best with your terminal\n1. Dark mode\nTo change this later, run /theme",
-    "Security notes:\nPress Enter to continue",
-    "Accessing workspace:\nQuick safety check: Is this a project you created or one you trust?\n1. No, exit\n2. Yes, I trust this folder",
-    "WARNING: Claude Code running in Bypass Permissions mode\n1. No, exit\n2. Yes, I accept",
+    "Choose the text style that looks best with your terminal\n ❯ ✔ Dark mode\nTo change this later, run /theme\nSyntax theme: Monokai Extended (ctrl+t to disable)",
+    "Security notes:\n1. Claude can make mistakes.\n2. Due to prompt injection risks, only use it with code you trust\nPress Enter to continue…",
+    "Accessing workspace:\nQuick safety check: Is this a project you created or one\nyou trust?\n ❯ No, exit\n   Yes, I trust this folder\nEnter to confirm · Esc to cancel",
+    "WARNING: Claude Code running in Bypass Permissions mode\n ❯ No, exit\n   Yes, I accept\nEnter to confirm · Esc to cancel",
+    f"/remote-control is active · Continue at {url}\nTry the new fullscreen renderer?\n· Flicker-free output\n· Mouse support\n· Selected text auto-copies\n❯ 1. Yes, try it\n2. Not now\nEnter to confirm · Esc to cancel",
 ]
 screens = {
     "ready": ready,
     "old-url": f"Earlier link: https://claude.ai/code/session_old\n{ready}",
     "last-banner": f"/remote-control is active https://claude.ai/code/session_old\n{ready}",
-    "same-line": f"Earlier link: https://claude.ai/code/session_old\n/remote-control is active {url}\n/rc active | bypass permissions on",
-    "unrelated-errors": f"{ready}\nBuild failed: syntax error\nTasks pending; connecting to build service",
+    "same-line": f"Earlier link: https://claude.ai/code/session_old\n/remote-control is active {url}\n{main_input}",
+    "unrelated-errors": f"/remote-control is active\n{url}\nBuild failed: syntax error\nTasks pending; connecting to build service\n{main_input}",
+    "ready-quoted": f"{prompts[0]}\n{prompts[1]}\n{prompts[2]}\n{prompts[3]}\n{ready}",
     "unknown": f"Unknown confirmation: authorize a new plugin?\n{url}",
     "partial": f"{ready}\nSecurity notes:\nUnrecognized options; do NOT continue",
     "auth": "Log in to Claude\nOpen https://claude.ai/oauth/authorize to sign in",
@@ -70,6 +73,15 @@ screens = {
     "stale": f"{ready}\nRemote Control is connecting",
     "failed": f"{ready}\nRemote Control connection failed: test failure",
     "consent": f"{ready}\n{prompts[3]}",
+    "mixed-security": f"{prompts[1]}\nUnrecognized choice: authorize a new plugin?\n❯ 1. Yes\n2. No",
+    "mixed-trust": f"{prompts[2]}\nUnrecognized choice: authorize a new plugin?\n❯ 1. Yes\n2. No\nEnter to confirm · Esc to cancel",
+    "mixed-bypass": f"{prompts[3]}\nUnrecognized choice: authorize a new plugin?\n❯ 1. Yes\n2. No\nEnter to confirm · Esc to cancel",
+    "mixed-fullscreen": f"{prompts[4]}\nUnrecognized choice: authorize a new plugin?\n❯ 1. Yes\n2. No\nEnter to confirm · Esc to cancel",
+    "ready-modal": f"{ready}\nUnrecognized choice: authorize a new plugin?\n❯ 1. Yes\n2. No\nEnter to confirm · Esc to cancel",
+    "no-input": f"/remote-control is active\n{url}\n/rc active | bypass permissions on",
+    "indented-input": ready.replace('❯ Try', '  ❯ Try'),
+    "selector-input": ready.replace('❯ Try "fix lint errors"', '❯ 1. Yes'),
+    "incomplete-fullscreen": f"{ready}\nTry the new fullscreen renderer?\n❯ 1. Yes, try it\n2. Not now\nEnter to confirm · Esc to cancel",
     "blank": "",
 }
 tty.setraw(0)
@@ -192,7 +204,7 @@ for n in 1 2; do
 done
 [[ $(grep -l 'started session' "$tmp/race-"*-output | wc -l) == 1 ]] || fail "expected one new session"
 [[ $(grep -l 'reusing existing session' "$tmp/race-"*-output | wc -l) == 1 ]] || fail "expected one concurrent reuse"
-printf '\r\r\033[B\r\033[B\r' >"$tmp/expected-keys"
+printf '\r\r\033[B\r\033[B\r\033[B\r' >"$tmp/expected-keys"
 cmp "$tmp/expected-keys" "$HOME/keys"
 rm -r "$HOME/race"
 rm "$HOME/ui-mode"
@@ -204,13 +216,13 @@ printf sequence >"$HOME/ui-mode"
 rm "$HOME/keys"
 ROLES_START_CLAUDE_TIMEOUT=5 "$launcher" >"$tmp/output"
 grep -q 'Remote Control: https://claude.ai/code/session_test123' "$tmp/output"
-printf '\r\r\033[B\r\033[B\r' >"$tmp/expected-keys"
+printf '\r\r\033[B\r\033[B\r\033[B\r' >"$tmp/expected-keys"
 cmp "$tmp/expected-keys" "$HOME/keys"
 tmux kill-session -t '=claude'
 
 # Return the current banner's URL, never an earlier transcript/banner link.
 # Unrelated error/pending words on later lines must not poison RC readiness.
-for mode in old-url last-banner same-line unrelated-errors; do
+for mode in old-url last-banner same-line unrelated-errors ready-quoted; do
   printf '%s' "$mode" >"$HOME/ui-mode"
   rm "$HOME/keys"
   ROLES_START_CLAUDE_TIMEOUT=2 "$launcher" >"$tmp/output"
@@ -220,9 +232,11 @@ for mode in old-url last-banner same-line unrelated-errors; do
 done
 
 # Unknown/partial screens, blank render, and URLs without readiness get no keys.
-# Error text must defeat even stale positive markers; a pending consent must
-# not be mistaken for readiness either, and may be answered only once.
-for mode in unknown partial auth blank pending incomplete no-current-url stale failed consent exit; do
+# Error text must defeat stale positive markers. Quoted known prompts and
+# appended/partial modals must neither get keys nor count as an unblocked UI.
+for mode in unknown partial auth blank pending incomplete no-current-url stale failed consent \
+  mixed-security mixed-trust mixed-bypass mixed-fullscreen ready-modal no-input \
+  indented-input selector-input incomplete-fullscreen exit; do
   printf '%s' "$mode" >"$HOME/ui-mode"
   rm -f "$HOME/keys"
   expect_failure 1 env ROLES_START_CLAUDE_TIMEOUT=1 "$launcher"
@@ -230,12 +244,7 @@ for mode in unknown partial auth blank pending incomplete no-current-url stale f
   grep -q 'Attach with: tmux attach -t claude' "$tmp/output"
   if [[ $mode != exit ]]; then
     tmux has-session -t '=claude' || fail "$mode session was not preserved"
-    if [[ $mode == consent ]]; then
-      printf '\033[B\r' >"$tmp/expected-keys"
-      cmp "$tmp/expected-keys" "$HOME/keys"
-    else
-      [[ ! -s "$HOME/keys" ]] || fail "keys sent to $mode screen"
-    fi
+    [[ ! -s "$HOME/keys" ]] || fail "keys sent to $mode screen"
     case $mode in
       unknown) grep -q 'Unknown confirmation' "$tmp/output" ;;
       failed) grep -q 'Remote Control reported a failure' "$tmp/output" ;;

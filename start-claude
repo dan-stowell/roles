@@ -6,8 +6,9 @@ set -euo pipefail
 # session (including when another launcher wins the new-session race).
 wait_for_startup() {
   local pane=$1 deadline=$((SECONDS + timeout)) screen='' captured url lower
-  local line rc_failed rc_pending url_lines
-  local theme=0 security=0 trust=0 bypass=0 reason='startup timed out'
+  local line raw rc_failed rc_pending url_lines text tail previous third fourth selected conversation input_distance
+  local theme=0 security=0 trust=0 bypass=0 fullscreen=0 reason='startup timed out'
+  local selector_pattern='^❯[[:space:] ]*[0-9]+\.'
   local -a keys
   while ((SECONDS < deadline)); do
     if ! captured=$(tmux capture-pane -p -J -t "$pane" 2>/dev/null); then
@@ -19,8 +20,23 @@ wait_for_startup() {
       reason='Claude exited before Remote Control was ready'
       break
     fi
-    url='' rc_failed=0 rc_pending=0 url_lines=0
+    url='' rc_failed=0 rc_pending=0 url_lines=0 text=''
+    tail='' previous='' third='' fourth='' selected='' conversation=0 input_distance=-1
     while IFS= read -r line; do
+      raw=$line
+      line=${line#"${line%%[![:space:]]*}"}
+      line=${line%"${line##*[![:space:]]}"}
+      if [[ -n $line ]]; then
+        if [[ $raw == '❯'* ]]; then
+          input_distance=0
+        elif ((input_distance >= 0)); then
+          input_distance=$((input_distance + 1))
+        fi
+        if [[ $line =~ ^─+$ && $tail == '❯'* && $previous =~ ^─+$ ]]; then conversation=1; fi
+        fourth=$third third=$previous previous=$tail tail=$line
+        text+="$line "
+        if [[ $line == '❯'* ]]; then selected=$line; fi
+      fi
       # Status words belong to an RC status line, not arbitrary later output.
       lower=${line,,}
       if [[ $lower =~ remote.control.*(failed|error|disabled) ||
@@ -51,38 +67,53 @@ wait_for_startup() {
 
     # Each known prompt is answered at most once, even during a slow redraw.
     # Unknown prompts (including authentication) are deliberately left alone.
+    # Require its active selection/tail, not quoted onboarding in a main frame.
     keys=()
-    if [[ $screen == *'Choose the text style that looks best with your terminal'* &&
-      $screen == *'To change this later, run /theme'* && $screen == *'Dark mode'* ]]; then
+    if ((conversation == 0)) &&
+      [[ $text == *'Choose the text style that looks best with your terminal'* &&
+        $text == *'To change this later, run /theme'* &&
+        $selected == '❯ ✔ Dark mode' &&
+        $tail == 'Syntax theme: Monokai Extended (ctrl+t to disable)' ]]; then
       if ((theme == 0)); then
         theme=1
         keys=(Enter)
       fi
-    elif [[ $screen == *'Security notes:'* && $screen == *'Press Enter to continue'* ]]; then
+    elif ((conversation == 0)) &&
+      [[ $text == *'Security notes:'* && -z $selected &&
+        $tail == 'Press Enter to continue…' ]]; then
       if ((security == 0)); then
         security=1
         keys=(Enter)
       fi
-    elif [[ $screen == *'Accessing workspace:'* &&
-      $screen == *'Quick safety check: Is this a project you created or one you trust?'* &&
-      $screen == *'No, exit'* && $screen == *'Yes, I trust this folder'* ]]; then
+    elif ((conversation == 0)) &&
+      [[ $text == *'Accessing workspace:'* &&
+        $text == *'Quick safety check: Is this a project you created or one you trust?'* &&
+        $selected == '❯ No, exit' && $previous == 'Yes, I trust this folder' &&
+        $tail == 'Enter to confirm · Esc to cancel' ]]; then
       if ((trust == 0)); then
         trust=1
         keys=(Down Enter)
       fi
-    elif [[ $screen == *'WARNING: Claude Code running in Bypass Permissions mode'* &&
-      $screen == *'No, exit'* && $screen == *'Yes, I accept'* ]]; then
+    elif ((conversation == 0)) &&
+      [[ $text == *'WARNING: Claude Code running in Bypass Permissions mode'* &&
+        $selected == '❯ No, exit' && $previous == 'Yes, I accept' &&
+        $tail == 'Enter to confirm · Esc to cancel' ]]; then
       if ((bypass == 0)); then
         bypass=1
         keys=(Down Enter)
       fi
-    elif [[ $screen == *'Choose the text style'* || $screen == *'Security notes:'* ||
-      $screen == *'Accessing workspace:'* || $screen == *'Bypass Permissions mode'* ||
-      $screen == *'Press Enter to continue'* ]]; then
-      # A partially rendered/changed onboarding prompt is not readiness.
-      :
-    elif [[ -n $url && $screen == *'/rc active'* &&
-      $screen == *'bypass permissions on'* ]] && ((rc_pending == 0)); then
+    elif [[ $text == *'Try the new fullscreen renderer?'* &&
+      $text == *'Flicker-free output'* && $text == *'Mouse support'* &&
+      $text == *'Selected text auto-copies'* && $selected == '❯ 1. Yes, try it' &&
+      $previous == '2. Not now' && $tail == 'Enter to confirm · Esc to cancel' ]]; then
+      if ((fullscreen == 0)); then
+        fullscreen=1
+        keys=(Down Enter)
+      fi
+    elif [[ -n $url && $tail == *'bypass permissions on'*'/rc active' &&
+      $fourth =~ ^─+$ && $previous =~ ^─+$ && $third == '❯'* &&
+      ! $third =~ $selector_pattern ]] && ((rc_pending == 0 && input_distance == 2)); then
+      # The last four nonblank rows must be the unblocked main input frame.
       printf 'Remote Control: %s\n' "$url"
       return 0
     fi
