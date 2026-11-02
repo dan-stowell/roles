@@ -1,0 +1,27 @@
+#!/bin/bash
+# Start the coordinator in tmux, without replacing an existing conversation.
+set -euo pipefail
+
+if ! command -v tmux >/dev/null; then
+  echo "start-claude: tmux is required; install it and rerun setup" >&2
+  exit 1
+fi
+if tmux has-session -t '=claude' 2>/dev/null; then
+  echo "start-claude: reusing existing session (arguments ignored)"
+else
+  if ! claude=$(command -v claude); then
+    echo "start-claude: claude is required; install Claude Code and rerun setup" >&2
+    exit 1
+  fi
+  prompt=$HOME/.config/roles/coordinator.md
+  if [ ! -f "$prompt" ] || [ ! -r "$prompt" ]; then
+    echo "start-claude: cannot read $prompt; rerun setup" >&2
+    exit 1
+  fi
+  prompt=$(cat "$prompt")
+  # Separate command arguments make tmux exec directly, without shell parsing.
+  tmux new-session -d -s claude -c "$PWD" \
+    "$claude" --append-system-prompt "$prompt" "$@"
+  echo "start-claude: started session"
+fi
+echo "Attach with: tmux attach -t claude"

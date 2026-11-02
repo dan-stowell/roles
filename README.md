@@ -25,6 +25,36 @@ Add "in research mode" for the research coordinator.
 Don't edit the installed copies in `~/.claude` or `~/.config`; change this
 repo and rerun `setup`.
 
+## Starting Claude
+
+`setup` requires Claude Code and tmux on `PATH`, and installs
+`~/.local/bin/start-claude`. Go is needed to build the optional login page.
+After logging in, that page calls the launcher automatically. To launch by hand:
+
+```sh
+~/.local/bin/start-claude
+tmux attach -t claude
+```
+
+The launcher starts a detached `claude` tmux session in the calling directory
+(the login service uses your home directory), appending the installed
+`~/.config/roles/coordinator.md` to Claude's normal system prompt. It does not
+bypass permission checks. Complete any interactive onboarding after attaching;
+successful launch means tmux started the session, not that Claude is ready.
+Detach without stopping Claude with `Ctrl-b d`.
+
+Arguments are passed through, for example `start-claude --continue`. Running it
+again reuses the existing session without restarting Claude; new arguments are
+ignored until that session ends.
+
+## Checks
+
+Run `./tests/start-claude.sh` for isolated launcher/setup integration tests
+(requires Bash and tmux). Build and test the login page with
+`(cd login && go build ./... && go test ./...)`. Shell checks:
+`shellcheck setup start-claude tests/start-claude.sh` and
+`shfmt -d -i 2 -ci setup start-claude tests/start-claude.sh`.
+
 ## What's here
 
 - `guidance.md`: the VM notes every agent reads. Everything builds with tools
