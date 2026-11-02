@@ -38,19 +38,31 @@ tmux attach -t claude
 
 The launcher starts a detached `claude` tmux session in the calling directory
 (the login service uses your home directory), appending the installed
-`~/.config/roles/coordinator.md` to Claude's normal system prompt. It does not
-bypass permission checks. Complete any interactive onboarding after attaching;
-successful launch means tmux started the session, not that Claude is ready.
-Detach without stopping Claude with `Ctrl-b d`.
+`~/.config/roles/coordinator.md` to Claude's normal system prompt. It confirms
+the known theme, security, workspace-trust and bypass-permissions onboarding
+screens automatically in a new session.
+**Dangerous default:** it enables `--remote-control` and
+`--dangerously-skip-permissions`, trusting the calling workspace and allowing
+commands without approval. Use this only in your scoped, disposable VM, with
+repositories you trust.
+
+After confirming Remote Control is active, it prints the Remote Control URL
+and an attach command. Login must already be complete; it never fills in
+credentials or work prompts. Unknown screens, errors or a 60-second startup
+timeout fail with the captured screen and attach instructions, leaving any
+surviving session for manual recovery. Detach without stopping Claude with
+`Ctrl-b d`.
 
 Arguments are passed through, for example `start-claude --continue`. Running it
 again reuses the existing session without restarting Claude; new arguments are
-ignored until that session ends.
+ignored until that session ends. Reused sessions are never sent onboarding
+keys or checked for readiness. For shorter startup checks, set
+`ROLES_START_CLAUDE_TIMEOUT` to a whole number of seconds from 1 to 60.
 
 ## Checks
 
 Run `./tests/start-claude.sh` for isolated launcher/setup integration tests
-(requires Bash and tmux). Build and test the login page with
+(requires Bash, tmux and Python 3 for the fake terminal UI). Build and test the login page with
 `(cd login && go build ./... && go test ./...)`. Shell checks:
 `shellcheck setup start-claude tests/start-claude.sh` and
 `shfmt -d -i 2 -ci setup start-claude tests/start-claude.sh`.

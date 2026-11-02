@@ -2,6 +2,80 @@
 # Start the coordinator in tmux, without replacing an existing conversation.
 set -euo pipefail
 
+# Only drive the pane this invocation created. Never send keys to a reused
+# session (including when another launcher wins the new-session race).
+wait_for_startup() {
+  local pane=$1 deadline=$((SECONDS + timeout)) screen='' captured url lower
+  local theme=0 security=0 trust=0 bypass=0 reason='startup timed out'
+  local -a keys
+  while ((SECONDS < deadline)); do
+    if ! captured=$(tmux capture-pane -p -J -t "$pane" 2>/dev/null); then
+      reason='Claude exited before Remote Control was ready'
+      break
+    fi
+    screen=$captured
+    if [[ $(tmux display-message -p -t "$pane" '#{pane_dead}' 2>/dev/null) != 0 ]]; then
+      reason='Claude exited before Remote Control was ready'
+      break
+    fi
+    lower=${screen,,}
+    if [[ $lower =~ remote.control.*(failed|error|disabled) ||
+      $lower =~ failed.*remote.control ]]; then
+      reason='Remote Control reported a failure'
+      break
+    fi
+
+    # Each known prompt is answered at most once, even during a slow redraw.
+    # Unknown prompts (including authentication) are deliberately left alone.
+    keys=()
+    if [[ $screen == *'Choose the text style that looks best with your terminal'* &&
+      $screen == *'To change this later, run /theme'* && $screen == *'Dark mode'* ]]; then
+      if ((theme == 0)); then
+        theme=1
+        keys=(Enter)
+      fi
+    elif [[ $screen == *'Security notes:'* && $screen == *'Press Enter to continue'* ]]; then
+      if ((security == 0)); then
+        security=1
+        keys=(Enter)
+      fi
+    elif [[ $screen == *'Accessing workspace:'* &&
+      $screen == *'Quick safety check: Is this a project you created or one you trust?'* &&
+      $screen == *'No, exit'* && $screen == *'Yes, I trust this folder'* ]]; then
+      if ((trust == 0)); then
+        trust=1
+        keys=(Down Enter)
+      fi
+    elif [[ $screen == *'WARNING: Claude Code running in Bypass Permissions mode'* &&
+      $screen == *'No, exit'* && $screen == *'Yes, I accept'* ]]; then
+      if ((bypass == 0)); then
+        bypass=1
+        keys=(Down Enter)
+      fi
+    elif [[ $screen == *'Choose the text style'* || $screen == *'Security notes:'* ||
+      $screen == *'Accessing workspace:'* || $screen == *'Bypass Permissions mode'* ||
+      $screen == *'Press Enter to continue'* ]]; then
+      # A partially rendered/changed onboarding prompt is not readiness.
+      :
+    elif [[ $screen == *'/remote-control is active'* &&
+      $screen == *'/rc active'* && $screen == *'bypass permissions on'* &&
+      ! $lower =~ remote.control.*(pending|connecting) &&
+      $screen =~ https://claude\.ai/code/session_[[:alnum:]_-]+ ]]; then
+      url=${BASH_REMATCH[0]}
+      printf 'Remote Control: %s\n' "$url"
+      return 0
+    fi
+    if ((${#keys[@]})) && ! tmux send-keys -t "$pane" "${keys[@]}"; then
+      reason='could not send onboarding keys to the new pane'
+      break
+    fi
+    sleep 0.1
+  done
+  printf 'start-claude: %s; finish login/onboarding or inspect the error manually.\n' "$reason" >&2
+  printf '%s\n' 'Last captured screen:' "$screen" 'Attach with: tmux attach -t claude' >&2
+  return 1
+}
+
 if ! command -v tmux >/dev/null; then
   echo "start-claude: tmux is required; install it and rerun setup" >&2
   exit 1
@@ -19,12 +93,21 @@ else
     exit 1
   fi
   prompt=$(cat "$prompt")
+  # Shorter deadlines are useful for checks; never allow an unbounded wait.
+  timeout=${ROLES_START_CLAUDE_TIMEOUT:-60}
+  if [[ ! $timeout =~ ^[1-9][0-9]?$ ]] || ((timeout > 60)); then
+    echo "start-claude: ROLES_START_CLAUDE_TIMEOUT must be 1–60 seconds" >&2
+    exit 1
+  fi
   # Separate command arguments make tmux exec directly, without shell parsing.
-  if error=$(tmux new-session -d -s claude -c "$PWD" \
-    "$claude" --append-system-prompt "$prompt" "$@" 2>&1); then
+  if pane=$(tmux new-session -d -s claude -c "$PWD" -x 160 -y 50 -P -F '#{pane_id}' \
+    "$claude" --remote-control --dangerously-skip-permissions \
+    --append-system-prompt "$prompt" "$@" 2>&1); then
     echo "start-claude: started session"
+    wait_for_startup "$pane"
   else
     status=$?
+    error=$pane
     # Another launcher may have created the session after our first check.
     if tmux has-session -t '=claude' 2>/dev/null; then
       echo "start-claude: reusing existing session (arguments ignored)"
