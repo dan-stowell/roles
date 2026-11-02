@@ -1,0 +1,172 @@
+#!/bin/bash
+# Start the coordinator in tmux, without replacing an existing conversation.
+set -euo pipefail
+
+# Only drive the pane this invocation created. Never send keys to a reused
+# session (including when another launcher wins the new-session race).
+wait_for_startup() {
+  local pane=$1 deadline=$((SECONDS + timeout)) screen='' captured url lower
+  local line raw rc_failed rc_pending url_lines text tail previous third fourth selected conversation input_distance
+  local theme=0 security=0 trust=0 bypass=0 fullscreen=0 reason='startup timed out'
+  local selector_pattern='^❯[[:space:] ]*[0-9]+\.'
+  local -a keys
+  while ((SECONDS < deadline)); do
+    if ! captured=$(tmux capture-pane -p -J -t "$pane" 2>/dev/null); then
+      reason='Claude exited before Remote Control was ready'
+      break
+    fi
+    screen=$captured
+    if [[ $(tmux display-message -p -t "$pane" '#{pane_dead}' 2>/dev/null) != 0 ]]; then
+      reason='Claude exited before Remote Control was ready'
+      break
+    fi
+    url='' rc_failed=0 rc_pending=0 url_lines=0 text=''
+    tail='' previous='' third='' fourth='' selected='' conversation=0 input_distance=-1
+    while IFS= read -r line; do
+      raw=$line
+      line=${line#"${line%%[![:space:]]*}"}
+      line=${line%"${line##*[![:space:]]}"}
+      if [[ -n $line ]]; then
+        if [[ $raw == '❯'* ]]; then
+          input_distance=0
+        elif ((input_distance >= 0)); then
+          input_distance=$((input_distance + 1))
+        fi
+        if [[ $line =~ ^─+$ && $tail == '❯'* && $previous =~ ^─+$ ]]; then conversation=1; fi
+        fourth=$third third=$previous previous=$tail tail=$line
+        text+="$line "
+        if [[ $line == '❯'* ]]; then selected=$line; fi
+      fi
+      # Status words belong to an RC status line, not arbitrary later output.
+      lower=${line,,}
+      if [[ $lower =~ remote.control.*(failed|error|disabled) ||
+        $lower =~ failed.*remote.control ]]; then
+        rc_failed=1
+      fi
+      if [[ $lower =~ remote.control.*(pending|connecting) ]]; then
+        rc_pending=1
+      fi
+      if [[ $line == *'/remote-control is active'* ]]; then
+        # Only the last active banner's same-line or next-line link is current.
+        url='' url_lines=2
+        line=${line##*'/remote-control is active'}
+      fi
+      if ((url_lines > 0)); then
+        if [[ $line =~ https://claude\.ai/code/session_[[:alnum:]_-]+ ]]; then
+          url=${BASH_REMATCH[0]}
+          url_lines=0
+        else
+          url_lines=$((url_lines - 1))
+        fi
+      fi
+    done <<<"$screen"
+    if ((rc_failed)); then
+      reason='Remote Control reported a failure'
+      break
+    fi
+
+    # Each known prompt is answered at most once, even during a slow redraw.
+    # Unknown prompts (including authentication) are deliberately left alone.
+    # Require its active selection/tail, not quoted onboarding in a main frame.
+    keys=()
+    if ((conversation == 0)) &&
+      [[ $text == *'Choose the text style that looks best with your terminal'* &&
+        $text == *'To change this later, run /theme'* &&
+        $selected == '❯ ✔ Dark mode' &&
+        $tail == 'Syntax theme: Monokai Extended (ctrl+t to disable)' ]]; then
+      if ((theme == 0)); then
+        theme=1
+        keys=(Enter)
+      fi
+    elif ((conversation == 0)) &&
+      [[ $text == *'Security notes:'* && -z $selected &&
+        $tail == 'Press Enter to continue…' ]]; then
+      if ((security == 0)); then
+        security=1
+        keys=(Enter)
+      fi
+    elif ((conversation == 0)) &&
+      [[ $text == *'Accessing workspace:'* &&
+        $text == *'Quick safety check: Is this a project you created or one you trust?'* &&
+        $selected == '❯ No, exit' && $previous == 'Yes, I trust this folder' &&
+        $tail == 'Enter to confirm · Esc to cancel' ]]; then
+      if ((trust == 0)); then
+        trust=1
+        keys=(Down Enter)
+      fi
+    elif ((conversation == 0)) &&
+      [[ $text == *'WARNING: Claude Code running in Bypass Permissions mode'* &&
+        $selected == '❯ No, exit' && $previous == 'Yes, I accept' &&
+        $tail == 'Enter to confirm · Esc to cancel' ]]; then
+      if ((bypass == 0)); then
+        bypass=1
+        keys=(Down Enter)
+      fi
+    elif [[ $text == *'Try the new fullscreen renderer?'* &&
+      $text == *'Flicker-free output'* && $text == *'Mouse support'* &&
+      $text == *'Selected text auto-copies'* && $selected == '❯ 1. Yes, try it' &&
+      $previous == '2. Not now' && $tail == 'Enter to confirm · Esc to cancel' ]]; then
+      if ((fullscreen == 0)); then
+        fullscreen=1
+        keys=(Down Enter)
+      fi
+    elif [[ -n $url && $tail == *'bypass permissions on'*'/rc active' &&
+      $fourth =~ ^─+$ && $previous =~ ^─+$ && $third == '❯'* &&
+      ! $third =~ $selector_pattern ]] && ((rc_pending == 0 && input_distance == 2)); then
+      # The last four nonblank rows must be the unblocked main input frame.
+      printf 'Remote Control: %s\n' "$url"
+      return 0
+    fi
+    if ((${#keys[@]})) && ! tmux send-keys -t "$pane" "${keys[@]}"; then
+      reason='could not send onboarding keys to the new pane'
+      break
+    fi
+    sleep 0.1
+  done
+  printf 'start-claude: %s; finish login/onboarding or inspect the error manually.\n' "$reason" >&2
+  printf '%s\n' 'Last captured screen:' "$screen" 'Attach with: tmux attach -t claude' >&2
+  return 1
+}
+
+if ! command -v tmux >/dev/null; then
+  echo "start-claude: tmux is required; install it and rerun setup" >&2
+  exit 1
+fi
+if tmux has-session -t '=claude' 2>/dev/null; then
+  echo "start-claude: reusing existing session (arguments ignored)"
+else
+  if ! claude=$(command -v claude); then
+    echo "start-claude: claude is required; install Claude Code and rerun setup" >&2
+    exit 1
+  fi
+  prompt=$HOME/.config/roles/coordinator.md
+  if [ ! -f "$prompt" ] || [ ! -r "$prompt" ]; then
+    echo "start-claude: cannot read $prompt; rerun setup" >&2
+    exit 1
+  fi
+  prompt=$(cat "$prompt")
+  # Shorter deadlines are useful for checks; never allow an unbounded wait.
+  timeout=${ROLES_START_CLAUDE_TIMEOUT:-60}
+  if [[ ! $timeout =~ ^[1-9][0-9]?$ ]] || ((timeout > 60)); then
+    echo "start-claude: ROLES_START_CLAUDE_TIMEOUT must be 1–60 seconds" >&2
+    exit 1
+  fi
+  # Separate command arguments make tmux exec directly, without shell parsing.
+  if pane=$(tmux new-session -d -s claude -c "$PWD" -x 160 -y 50 -P -F '#{pane_id}' \
+    "$claude" --remote-control --dangerously-skip-permissions \
+    --append-system-prompt "$prompt" "$@" 2>&1); then
+    echo "start-claude: started session"
+    wait_for_startup "$pane"
+  else
+    status=$?
+    error=$pane
+    # Another launcher may have created the session after our first check.
+    if tmux has-session -t '=claude' 2>/dev/null; then
+      echo "start-claude: reusing existing session (arguments ignored)"
+    else
+      printf '%s\n' "$error" >&2
+      exit "$status"
+    fi
+  fi
+fi
+echo "Attach with: tmux attach -t claude"
