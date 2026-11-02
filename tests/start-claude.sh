@@ -57,11 +57,16 @@ prompts = [
 ]
 screens = {
     "ready": ready,
+    "old-url": f"Earlier link: https://claude.ai/code/session_old\n{ready}",
+    "last-banner": f"/remote-control is active https://claude.ai/code/session_old\n{ready}",
+    "same-line": f"Earlier link: https://claude.ai/code/session_old\n/remote-control is active {url}\n/rc active | bypass permissions on",
+    "unrelated-errors": f"{ready}\nBuild failed: syntax error\nTasks pending; connecting to build service",
     "unknown": f"Unknown confirmation: authorize a new plugin?\n{url}",
     "partial": f"{ready}\nSecurity notes:\nUnrecognized options; do NOT continue",
     "auth": "Log in to Claude\nOpen https://claude.ai/oauth/authorize to sign in",
     "pending": f"Remote Control is pending\n{url}",
     "incomplete": f"/remote-control is active\n{url}\nbypass permissions on",
+    "no-current-url": f"{ready}\n/remote-control is active\nWaiting for a new link",
     "stale": f"{ready}\nRemote Control is connecting",
     "failed": f"{ready}\nRemote Control connection failed: test failure",
     "consent": f"{ready}\n{prompts[3]}",
@@ -203,10 +208,21 @@ printf '\r\r\033[B\r\033[B\r' >"$tmp/expected-keys"
 cmp "$tmp/expected-keys" "$HOME/keys"
 tmux kill-session -t '=claude'
 
+# Return the current banner's URL, never an earlier transcript/banner link.
+# Unrelated error/pending words on later lines must not poison RC readiness.
+for mode in old-url last-banner same-line unrelated-errors; do
+  printf '%s' "$mode" >"$HOME/ui-mode"
+  rm "$HOME/keys"
+  ROLES_START_CLAUDE_TIMEOUT=2 "$launcher" >"$tmp/output"
+  grep -q '^Remote Control: https://claude.ai/code/session_test123$' "$tmp/output"
+  [[ ! -s "$HOME/keys" ]] || fail "keys sent to ready $mode screen"
+  tmux kill-session -t '=claude'
+done
+
 # Unknown/partial screens, blank render, and URLs without readiness get no keys.
 # Error text must defeat even stale positive markers; a pending consent must
 # not be mistaken for readiness either, and may be answered only once.
-for mode in unknown partial auth blank pending incomplete stale failed consent exit; do
+for mode in unknown partial auth blank pending incomplete no-current-url stale failed consent exit; do
   printf '%s' "$mode" >"$HOME/ui-mode"
   rm -f "$HOME/keys"
   expect_failure 1 env ROLES_START_CLAUDE_TIMEOUT=1 "$launcher"

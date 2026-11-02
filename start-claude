@@ -6,6 +6,7 @@ set -euo pipefail
 # session (including when another launcher wins the new-session race).
 wait_for_startup() {
   local pane=$1 deadline=$((SECONDS + timeout)) screen='' captured url lower
+  local line rc_failed rc_pending url_lines
   local theme=0 security=0 trust=0 bypass=0 reason='startup timed out'
   local -a keys
   while ((SECONDS < deadline)); do
@@ -18,9 +19,32 @@ wait_for_startup() {
       reason='Claude exited before Remote Control was ready'
       break
     fi
-    lower=${screen,,}
-    if [[ $lower =~ remote.control.*(failed|error|disabled) ||
-      $lower =~ failed.*remote.control ]]; then
+    url='' rc_failed=0 rc_pending=0 url_lines=0
+    while IFS= read -r line; do
+      # Status words belong to an RC status line, not arbitrary later output.
+      lower=${line,,}
+      if [[ $lower =~ remote.control.*(failed|error|disabled) ||
+        $lower =~ failed.*remote.control ]]; then
+        rc_failed=1
+      fi
+      if [[ $lower =~ remote.control.*(pending|connecting) ]]; then
+        rc_pending=1
+      fi
+      if [[ $line == *'/remote-control is active'* ]]; then
+        # Only the last active banner's same-line or next-line link is current.
+        url='' url_lines=2
+        line=${line##*'/remote-control is active'}
+      fi
+      if ((url_lines > 0)); then
+        if [[ $line =~ https://claude\.ai/code/session_[[:alnum:]_-]+ ]]; then
+          url=${BASH_REMATCH[0]}
+          url_lines=0
+        else
+          url_lines=$((url_lines - 1))
+        fi
+      fi
+    done <<<"$screen"
+    if ((rc_failed)); then
       reason='Remote Control reported a failure'
       break
     fi
@@ -57,11 +81,8 @@ wait_for_startup() {
       $screen == *'Press Enter to continue'* ]]; then
       # A partially rendered/changed onboarding prompt is not readiness.
       :
-    elif [[ $screen == *'/remote-control is active'* &&
-      $screen == *'/rc active'* && $screen == *'bypass permissions on'* &&
-      ! $lower =~ remote.control.*(pending|connecting) &&
-      $screen =~ https://claude\.ai/code/session_[[:alnum:]_-]+ ]]; then
-      url=${BASH_REMATCH[0]}
+    elif [[ -n $url && $screen == *'/rc active'* &&
+      $screen == *'bypass permissions on'* ]] && ((rc_pending == 0)); then
       printf 'Remote Control: %s\n' "$url"
       return 0
     fi
