@@ -20,8 +20,18 @@ else
   fi
   prompt=$(cat "$prompt")
   # Separate command arguments make tmux exec directly, without shell parsing.
-  tmux new-session -d -s claude -c "$PWD" \
-    "$claude" --append-system-prompt "$prompt" "$@"
-  echo "start-claude: started session"
+  if error=$(tmux new-session -d -s claude -c "$PWD" \
+    "$claude" --append-system-prompt "$prompt" "$@" 2>&1); then
+    echo "start-claude: started session"
+  else
+    status=$?
+    # Another launcher may have created the session after our first check.
+    if tmux has-session -t '=claude' 2>/dev/null; then
+      echo "start-claude: reusing existing session (arguments ignored)"
+    else
+      printf '%s\n' "$error" >&2
+      exit "$status"
+    fi
+  fi
 fi
 echo "Attach with: tmux attach -t claude"

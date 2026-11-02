@@ -19,6 +19,17 @@ if [[ -f "\$HOME/tmux-fail" ]]; then
   echo "simulated tmux startup error" >&2
   exit 23
 fi
+# Hold each launcher's first check until both have observed no session.
+if [[ \$1 == has-session && -d "\$HOME/race" && ! -f "\$HOME/race/\$PPID" ]]; then
+  touch "\$HOME/race/\$PPID"
+  for ((i = 0; i < 100; i++)); do
+    ready=("\$HOME/race/"*)
+    if ((\${#ready[@]} == 2)); then exit 1; fi
+    sleep 0.02
+  done
+  echo "race barrier timed out" >&2
+  exit 99
+fi
 exec "$real_tmux" -L "$socket" -f /dev/null "\$@"
 EOF
 cat >"$tmp/bin/claude" <<'EOF'
@@ -86,6 +97,30 @@ grep -q 'reusing existing session' "$tmp/output"
 cmp "$tmp/expected" "$HOME/args"
 tmux kill-session -t '=claude'
 
+# Force two launches past the initial has-session check before either creates it.
+mkdir "$HOME/race"
+for n in 1 2; do
+  # The child Bash expands these positional arguments.
+  # shellcheck disable=SC2016
+  tmux new-session -d -s "race-$n" /bin/bash -c \
+    '"$1" >"$2" 2>&1; printf "%s\n" "$?" >"$3"' race \
+    "$launcher" "$tmp/race-$n-output" "$tmp/race-$n-status"
+done
+for ((i = 0; i < 100; i++)); do
+  [[ -f "$tmp/race-1-status" && -f "$tmp/race-2-status" ]] && break
+  sleep 0.02
+done
+for n in 1 2; do
+  [[ -f "$tmp/race-$n-status" ]] || fail "concurrent launch $n did not finish"
+  [[ $(cat "$tmp/race-$n-status") == 0 ]] || fail "concurrent launch $n failed: $(cat "$tmp/race-$n-output")"
+  grep -q 'tmux attach -t claude' "$tmp/race-$n-output"
+done
+[[ $(grep -l 'started session' "$tmp/race-"*-output | wc -l) == 1 ]] || fail "expected one new session"
+[[ $(grep -l 'reusing existing session' "$tmp/race-"*-output | wc -l) == 1 ]] || fail "expected one concurrent reuse"
+rm -r "$HOME/race"
+tmux has-session -t '=claude'
+tmux kill-session -t '=claude'
+
 # Run setup without system changes or a real build/service/Claude invocation.
 cat >"$tmp/bin/sudo" <<'EOF'
 #!/bin/bash
@@ -114,4 +149,4 @@ for ((i = 0; i < 100; i++)); do
 done
 printf '%s\0' --append-system-prompt "$(cat "$repo/modes/research.md")" >"$tmp/expected"
 cmp "$tmp/expected" "$HOME/args"
-echo "PASS: launcher arguments, prompt, cwd, reuse, errors and setup installation"
+echo "PASS: launcher arguments, prompt, cwd, reuse/concurrent reuse, errors and setup installation"
